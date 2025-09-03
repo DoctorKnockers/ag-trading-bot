@@ -1,6 +1,5 @@
 # Python
 __pycache__/
-*.py[cod]
 *$py.class
 *.so
 .Python
@@ -10,7 +9,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+
 lib64/
 parts/
 sdist/
@@ -24,16 +23,18 @@ share/python-wheels/
 MANIFEST
 
 # Virtual Environment
-venv/
-env/
-ENV/
-.venv/
 
 # Environment Variables
 .env
 .env.local
 .env.production
 .env.staging
+
+# Discord session files (NEVER commit these!)
+discord_session.json
+discord_cookies.pkl
+*.session
+*.cookies
 
 # IDE
 .vscode/
@@ -51,14 +52,8 @@ ENV/
 ehthumbs.db
 Thumbs.db
 
-# Logs
-*.log
-logs/
 
-# Database
-*.db
-*.sqlite
-*.sqlite3
+
 
 # Test artifacts
 .pytest_cache/
@@ -106,5 +101,5 @@ dmypy.json
 
 # Project specific
 *.tmp
-.aider*
+
 .ruff_cache/

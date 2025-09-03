@@ -1,0 +1,62 @@
+version: 1
+project: ag-trading-bot
+tasks:
+  - id: bootstrap_db
+    desc: Apply SQL in repo /sql (001..003). Verify tables & views exist.
+    done:
+      - "SELECT to_regclass('public.discord_raw') IS NOT NULL"
+      - "SELECT to_regclass('public.v_ga_export') IS NOT NULL"
+
+  - id: mint_resolver
+    depends: [bootstrap_db]
+    desc: Implement ingest/mint_resolver.py (URL parse, pair→mint, pump.fun fallback, RPC verify) and upsert mint_resolution.
+    done:
+      - "Given a sample discord_raw payload with a solscan link, row appears in mint_resolution(resolved=true)."
+
+  - id: acceptance_validator
+    depends: [mint_resolver]
+    desc: Implement objective rejects only (Jupiter tiny buy/sell, SPL authorities) into acceptance_status.
+    done:
+      - "Known good mint → ACCEPT with evidence; fake mint → REJECT INVALID_MINT."
+
+  - id: outcome_tracker
+    depends: [acceptance_validator]
+    desc: 24h tracker; T0 entry; TOUCH_10X + SUSTAINED_10X with executability; writes outcomes_24h.
+    done:
+      - "Synthetic feed causes a SUSTAINED_10X row with win=true."
+
+  - id: features_snapshot
+    depends: [acceptance_validator]
+    desc: T0 features (normalized per-day percentiles). No leakage from future data.
+    done:
+      - "One row per ACCEPT in features_snapshot with expected keys."
+
+  - id: cluster_router
+    depends: [features_snapshot]
+    desc: Nightly k-means K=3–4; store centroids & covariance; implement runtime assigner.
+    done:
+      - "Distances and cluster ids stored; OOD threshold computed."
+
+  - id: ga_train
+    depends: [cluster_router]
+    desc: DEAP GA per cluster with temporal blocked CV; worst-fold aggregation; holdout eval.
+    done:
+      - "strategy_params rows (active=false) with metrics JSON showing holdout precision."
+
+  - id: cma_polish
+    depends: [ga_train]
+    desc: CMA-ES/coordinate descent polish of top candidates; update metrics.
+    done:
+      - "Improved/confirmed metrics; artifacts logged."
+
+  - id: promote_strategy
+    depends: [ga_train]
+    desc: Promote if holdout BUY win-rate ≥ 60% and buy-rate within band; enable shadow.
+    done:
+      - "Exactly one active strategy per cluster."
+
+  - id: signal_service
+    depends: [promote_strategy]
+    desc: On ACCEPT events, load active strategy per cluster and emit BUY/SKIP to signals.
+    done:
+      - "New ACCEPT creates a logged signal row."
