@@ -15,9 +15,10 @@ DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://localhost/ag_trading_bot'
 DB_POOL_MIN_SIZE = int(os.getenv('DB_POOL_MIN_SIZE', '2'))
 DB_POOL_MAX_SIZE = int(os.getenv('DB_POOL_MAX_SIZE', '10'))
 
-# Discord Configuration - PASSIVE SCRAPING ONLY
-# NO WEBHOOKS, NO BOTS - Only user session for read-only access
-DISCORD_USER_TOKEN = os.getenv('DISCORD_USER_TOKEN')  # User token for passive scraping (NOT bot token)
+# Discord Configuration - WEB SCRAPING ONLY  
+# NO WEBHOOKS, NO BOTS, NO TOKENS - Only credential-based web scraping
+DISCORD_USERNAME = os.getenv('DISCORD_USERNAME')  # Discord email for web login
+DISCORD_PASSWORD = os.getenv('DISCORD_PASSWORD')  # Discord password for web login
 DISCORD_CHANNEL_ID = os.getenv('DISCORD_CHANNEL_ID')  # Alpha Gardeners #launchpads channel
 DISCORD_GUILD_ID = os.getenv('DISCORD_GUILD_ID')  # Alpha Gardeners guild ID
 
@@ -114,7 +115,8 @@ CLUSTER_LABELS = {
 def validate_config() -> bool:
     """Validate required configuration."""
     required = [
-        ('DISCORD_USER_TOKEN', DISCORD_USER_TOKEN),
+        ('DISCORD_USERNAME', DISCORD_USERNAME),
+        ('DISCORD_PASSWORD', DISCORD_PASSWORD), 
         ('DISCORD_CHANNEL_ID', DISCORD_CHANNEL_ID),
         ('HELIUS_API_KEY', HELIUS_API_KEY),
         ('BIRDEYE_API_KEY', BIRDEYE_API_KEY),
@@ -135,7 +137,7 @@ def validate_config() -> bool:
 # Export all settings
 __all__ = [
     'DATABASE_URL', 'DB_POOL_MIN_SIZE', 'DB_POOL_MAX_SIZE',
-    'DISCORD_USER_TOKEN', 'DISCORD_CHANNEL_ID', 'DISCORD_GUILD_ID',
+    'DISCORD_USERNAME', 'DISCORD_PASSWORD', 'DISCORD_CHANNEL_ID', 'DISCORD_GUILD_ID',
     'HELIUS_API_KEY', 'HELIUS_RPC_URL', 'BACKUP_RPC_URL',
     'BIRDEYE_API_KEY', 'DEXSCREENER_API_KEY', 'JUPITER_API_URL',
     'MULTIPLE', 'T_DWELL_SEC', 'Q_TEST_SOL', 'S_MAX',

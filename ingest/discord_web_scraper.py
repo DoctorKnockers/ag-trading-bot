@@ -59,7 +59,7 @@ class DiscordWebScraper:
         self.target_channel_url = None
         
         # Login credentials from environment
-        self.email = os.getenv('DISCORD_EMAIL')
+        self.email = os.getenv('DISCORD_USERNAME') or os.getenv('DISCORD_EMAIL')
         self.password = os.getenv('DISCORD_PASSWORD')
         
         # Message tracking
