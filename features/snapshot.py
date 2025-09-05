@@ -15,6 +15,7 @@ from utils.time_utils import get_entry_timestamp
 from utils.price_helpers import BirdeyeClient, get_current_price
 from utils.jupiter_helpers import check_token_liquidity
 from utils.solana_helpers import get_token_supply, get_token_decimals
+from ingest.metrics_parser import LaunchpadMetricsParser
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,9 @@ class FeatureSnapshot:
         
         # Feature names from settings
         self.feature_names = settings.FEATURE_NAMES
+        
+        # Metrics parser for Discord messages
+        self.metrics_parser = LaunchpadMetricsParser()
     
     async def extract_t0_features(self, message_id: str, mint_address: str) -> Dict[str, Any]:
         """
@@ -43,125 +47,101 @@ class FeatureSnapshot:
             mint_address: Token mint address
             
         Returns:
-            Raw feature dictionary
+            Raw feature dictionary with all Discord metrics + external API data
         """
         t0 = get_entry_timestamp(message_id)
         
         logger.info(f"📸 Extracting T0 features for {mint_address} at {t0}")
         
-        # Initialize features with defaults
+        # Step 1: Get original Discord message payload
+        async with self.db_pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT payload FROM discord_raw WHERE message_id = $1
+            """, message_id)
+        
+        if not row:
+            raise ValueError(f"Discord message {message_id} not found")
+        
+        message_payload = row["payload"]
+        
+        # Step 2: Parse all metrics from Discord message
+        discord_metrics = self.metrics_parser.parse_message_metrics(message_payload)
+        validated_metrics = self.metrics_parser.validate_parsed_metrics(discord_metrics)
+        
+        # Step 3: Initialize features with Discord metrics + metadata
         features = {
             "message_id": message_id,
             "mint_address": mint_address,
             "t0_timestamp": t0.isoformat(),
-            "feature_version": self.feature_version
+            "feature_version": self.feature_version,
+            
+            # All Discord metrics
+            **validated_metrics
         }
         
-        # 1. Liquidity and routing features
-        liquidity_status, liquidity_data = await check_token_liquidity(mint_address)
+        # Step 4: Supplement with external API data (if Discord metrics are missing)
+        # Only fetch external data for metrics not already captured from Discord
         
-        if liquidity_status == "LIQUIDITY_OK":
-            features.update({
-                "liquidity_usd": liquidity_data.get("liquidity_estimate_usd", 0),
-                "buy_routes": liquidity_data.get("buy_routes", 0),
-                "sell_routes": liquidity_data.get("sell_routes", 0),
-                "max_price_impact": liquidity_data.get("max_impact", 1.0),
-                "route_diversity": min(liquidity_data.get("buy_routes", 0), liquidity_data.get("sell_routes", 0))
-            })
-        else:
-            features.update({
-                "liquidity_usd": 0,
-                "buy_routes": 0,
-                "sell_routes": 0,
-                "max_price_impact": 1.0,
-                "route_diversity": 0
-            })
-        
-        # 2. Market data from Birdeye
-        async with BirdeyeClient() as birdeye:
-            # Token overview
-            try:
-                url = f"{birdeye.base_url}/defi/token_overview"
-                params = {"address": mint_address}
-                
-                async with birdeye.session.get(url, params=params) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        if data.get("success") and data.get("data"):
-                            market_data = data["data"]
-                            
-                            features.update({
-                                "volume_24h_usd": float(market_data.get("v24hUSD", 0)),
-                                "volume_1h_usd": float(market_data.get("v1hUSD", 0)),
-                                "market_cap_usd": float(market_data.get("mc", 0)),
-                                "price_change_24h": float(market_data.get("v24hChangePercent", 0)),
-                                "unique_wallets_24h": int(market_data.get("uniqueWallet24h", 0)),
-                                "current_price": float(market_data.get("price", 0))
-                            })
-            except Exception as e:
-                logger.warning(f"Failed to get market data: {e}")
+        if not features.get("liquidity_usd"):
+            # Get Jupiter routing data as fallback
+            liquidity_status, liquidity_data = await check_token_liquidity(mint_address)
             
-            # Token security data
+            if liquidity_status == "LIQUIDITY_OK":
+                features.update({
+                    "external_liquidity_usd": liquidity_data.get("liquidity_estimate_usd", 0),
+                    "external_buy_routes": liquidity_data.get("buy_routes", 0),
+                    "external_sell_routes": liquidity_data.get("sell_routes", 0),
+                    "external_max_price_impact": liquidity_data.get("max_impact", 1.0)
+                })
+        
+        # Supplement with Birdeye data only if not in Discord metrics
+        if not features.get("market_cap_usd") or not features.get("holders_count"):
             try:
-                url = f"{birdeye.base_url}/defi/token_security"
-                params = {"address": mint_address}
-                
-                async with birdeye.session.get(url, params=params) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        if data.get("success") and data.get("data"):
-                            security_data = data["data"]
-                            
-                            features.update({
-                                "holder_count": int(security_data.get("holder", 0)),
-                                "top10_concentration": float(security_data.get("top10HolderPercent", 0)) / 100,
-                                "creator_percentage": float(security_data.get("creatorPercent", 0)) / 100
-                            })
-                            
-                            # Calculate age
-                            created_at = security_data.get("createdAt")
-                            if created_at:
-                                created_time = datetime.fromtimestamp(created_at / 1000)
-                                age_minutes = (t0.replace(tzinfo=None) - created_time).total_seconds() / 60
-                                features["age_minutes"] = max(0, age_minutes)
-                            else:
-                                features["age_minutes"] = 0
+                async with BirdeyeClient() as birdeye:
+                    # Get additional market data
+                    url = f"{birdeye.base_url}/defi/token_overview"
+                    params = {"address": mint_address}
+                    
+                    async with birdeye.session.get(url, params=params) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            if data.get("success") and data.get("data"):
+                                market_data = data["data"]
+                                
+                                # Only update if not already from Discord
+                                if not features.get("market_cap_usd"):
+                                    features["external_market_cap_usd"] = float(market_data.get("mc", 0))
+                                
+                                if not features.get("volume_1m_total_usd"):
+                                    features["external_volume_24h_usd"] = float(market_data.get("v24hUSD", 0))
+                                
+                                features["external_current_price"] = float(market_data.get("price", 0))
             except Exception as e:
-                logger.warning(f"Failed to get security data: {e}")
+                logger.warning(f"Failed to get external market data: {e}")
         
-        # 3. On-chain token data
-        try:
-            supply = await get_token_supply(mint_address)
-            decimals = await get_token_decimals(mint_address)
-            
-            if supply is not None:
-                features["total_supply"] = supply
-            if decimals is not None:
-                features["decimals"] = decimals
-                
-        except Exception as e:
-            logger.warning(f"Failed to get token data: {e}")
+        # Step 5: Calculate derived features using Discord metrics as primary source
+        # Use Discord metrics first, fallback to external
+        primary_mc = features.get("market_cap_usd") or features.get("external_market_cap_usd", 0)
+        primary_volume = features.get("volume_1m_total_usd") or features.get("external_volume_24h_usd", 0)
         
-        # 4. Derived features
-        # Volume to market cap ratio
-        volume_24h = features.get("volume_24h_usd", 0)
-        market_cap = features.get("market_cap_usd", 0)
-        
-        if market_cap > 0:
-            features["volume_to_mcap_ratio"] = volume_24h / market_cap
+        if primary_mc > 0 and primary_volume > 0:
+            features["derived_vol_to_mc_ratio"] = primary_volume / primary_mc
         else:
-            features["volume_to_mcap_ratio"] = 0
+            features["derived_vol_to_mc_ratio"] = features.get("volume_1m_to_mc_pct", 0) / 100
         
-        # Buy/sell pressure (placeholder - would need transaction analysis)
-        features["buy_sell_ratio"] = 0.5  # Neutral default
+        # Risk score based on Discord metrics
+        risk_factors = []
+        if features.get("mint_authority_flag"):
+            risk_factors.append("mint_authority")
+        if features.get("freeze_authority_flag"):
+            risk_factors.append("freeze_authority")
+        if features.get("creator_drained_count", 0) > 0:
+            risk_factors.append("creator_drained")
+        if features.get("bundled_pct", 0) > 50:
+            risk_factors.append("high_bundled")
         
-        # Smart money score (placeholder - would need wallet analysis)
-        features["smart_money_count"] = 0
-        
-        # Fill defaults for missing features
-        for feature_name in self.feature_names:
-            if feature_name not in features:
-                features[feature_name] = 0
+        features["risk_factors"] = risk_factors
+        features["risk_score"] = len(risk_factors) / 4.0  # Normalize to 0-1
         
         return features
     
@@ -177,14 +157,33 @@ class FeatureSnapshot:
         """
         normalized = raw_features.copy()
         
-        # Get percentile stats for each feature over the lookback window
+        # Get percentile stats for numeric features over the lookback window
         lookback_hours = settings.PERCENTILE_WINDOW_HOURS
         
+        # Define which features to normalize (numeric only)
+        numeric_features = [
+            "win_prediction_pct", "market_cap_usd", "liquidity_usd", "liquidity_pct",
+            "token_age_sec", "top10_holders_pct", "top20_holders_pct", "holders_count",
+            "swaps_f_count", "swaps_kyc_count", "swaps_unique_count", "swaps_sm_count",
+            "volume_1m_total_usd", "volume_1m_buy_pct", "volume_1m_sell_pct", "volume_1m_to_mc_pct",
+            "ag_score", "bundled_pct", "creator_pct", "funding_age_min",
+            "creator_drained_count", "creator_drained_total", "risk_score"
+        ]
+        
+        for feature_name in numeric_features:
+            if feature_name in raw_features:
+                raw_value = raw_features[feature_name]
+                
+                if isinstance(raw_value, (int, float)) and raw_value is not None:
+                    percentile = await self._get_feature_percentile(feature_name, raw_value, lookback_hours)
+                    normalized[f"{feature_name}_pct"] = percentile
+        
+        # Also normalize legacy feature names for compatibility
         for feature_name in self.feature_names:
             if feature_name in raw_features:
                 raw_value = raw_features[feature_name]
                 
-                if isinstance(raw_value, (int, float)):
+                if isinstance(raw_value, (int, float)) and raw_value is not None:
                     percentile = await self._get_feature_percentile(feature_name, raw_value, lookback_hours)
                     normalized[f"{feature_name}_pct"] = percentile
         
