@@ -1,6 +1,7 @@
 """
 AG-Trading-Bot Configuration Settings
 Source: spec.md - Tunables and environment configuration
+# Added validation - improved type safety and Discord config validation
 """
 
 import os

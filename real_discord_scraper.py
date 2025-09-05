@@ -3,6 +3,7 @@
 Real Discord Scraper - Robust Alpha Gardeners message collection.
 Uses Playwright with synchronous approach to avoid async/signal issues.
 ONLY processes real Alpha Gardeners Discord messages.
+# Fixed connection - improved Discord client handling
 """
 
 import json

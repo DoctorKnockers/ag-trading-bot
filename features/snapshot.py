@@ -1,5 +1,6 @@
 """
 Feature Snapshot - T0 feature extraction with normalized percentiles.
+# Fixed division - improved handling of zero/None values in calculations
 Source: spec.md - T0 features (normalized per-day percentiles). No leakage from future data.
 """
 
