@@ -28,15 +28,18 @@ class SignalService:
     4. BUY/SKIP decision with logging
     """
     
-    def __init__(self, db_pool: asyncpg.Pool):
-        self.db_pool = db_pool
-        self.feature_extractor = FeatureSnapshot(db_pool)
-        self.cluster_router = ClusterRouter(db_pool)
-        
-        # Cache for active strategies
-        self._strategy_cache = {}
-        self._cache_timestamp = None
-        self._cache_ttl = 300  # 5 minutes
+def __init__(self, db_pool: asyncpg.Pool):
+    self.db_pool = db_pool
+    self.feature_extractor = FeatureSnapshot(db_pool)
+    self.cluster_router = ClusterRouter(db_pool)
+    
+    # Initialize sentiment analyzer
+    self.sentiment_analyzer = get_analyzer(device='cpu')  # Use 'cuda' if GPU available
+    
+    # Cache for active strategies
+    self._strategy_cache = {}
+    self._cache_timestamp = None
+    self._cache_ttl = 300  # 5 minutes
     
     async def generate_signal(self, message_id: str, mint_address: str) -> Dict[str, Any]:
         """
@@ -74,39 +77,34 @@ class SignalService:
             
             features = row["features"]
             
-            # Step 3: Assign cluster
-            cluster_id, distance, is_ood = await self.cluster_router.assign_cluster(features)
-            
-            logger.info(f"📊 Cluster assignment: {cluster_id} (distance={distance:.3f}, OOD={is_ood})")
-            
-            # Step 4: Load active strategy for cluster
-            strategy = await self._get_active_strategy(cluster_id)
-            
-            if not strategy:
-                signal = "SKIP"
-                score = 0.0
-                reason = "No active strategy"
-            else:
-                # Step 5: Score with strategy
-                score = self._score_with_strategy(features, strategy)
-                
-                # Step 6: Apply decision logic
-                if is_ood and distance > 2.0:
-                    signal = "SKIP"
-                    reason = f"OOD (distance={distance:.2f})"
-                elif score < 0:
-                    signal = "SKIP"
-                    reason = "Failed thresholds"
-                else:
-                    # Apply buy cutoff
-                    buy_threshold = strategy["thresholds"]["buy_cutoff"] * 2.0  # Scale factor
-                    
-                    if score >= buy_threshold:
-                        signal = "BUY"
-                        reason = f"Score {score:.3f} ≥ threshold {buy_threshold:.3f}"
-                    else:
-                        signal = "SKIP"
-                        reason = f"Score {score:.3f} < threshold {buy_threshold:.3f}"
+            # Step 3: Get sentiment analysis
+token_description = features.get("token_description", "")
+sentiment_result = await self.sentiment_analyzer.analyze(token_description)
+sentiment_score = sentiment_result["sentiment_score"]
+
+# Step 4: Assign cluster
+cluster_id, distance, is_ood = await self.cluster_router.assign_cluster(features)
+
+logger.info(f"📊 Cluster assignment: {cluster_id} (distance={distance:.3f}, OOD={is_ood})")
+logger.info(f"🎭 Sentiment: {sentiment_score:.3f} ({sentiment_result['confidence']:.2f} confidence)")
+
+# Step 5: Load active strategy for cluster
+strategy = await self._get_active_strategy(cluster_id)
+
+if not strategy:
+    signal = "SKIP"
+    score = 0.0
+    reason = "No active strategy"
+else:
+    # Step 6: Combined scoring with sentiment
+    base_score = self._score_with_strategy(features, strategy)
+    
+    # Weight sentiment into score (30% weight)
+    score = (base_score * 0.7) + (sentiment_score * 0.3)
+    
+    # Adjust threshold based on sentiment confidence
+    confidence_boost = sentiment_result["confidence"] * 0.1
+    effective_score = score + confidence_boost
             
             # Step 7: Store signal
             signal_id = await self._store_signal(

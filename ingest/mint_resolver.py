@@ -14,6 +14,8 @@ import aiohttp
 import asyncpg
 import base58
 
+from validation.parallel_validator import ParallelValidator
+
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -44,6 +46,7 @@ class MintResolver:
     def __init__(self, db_pool: asyncpg.Pool):
         self.db_pool = db_pool
         self.session = None
+        self.validator = ParallelValidator(max_workers=4)
         
     async def setup(self):
         """Initialize HTTP session."""
@@ -59,6 +62,61 @@ class MintResolver:
     async def resolve_message(self, message_id: str) -> Dict[str, Any]:
         """
         Resolve mint from a Discord message.
+        # ADD THIS NEW METHOD:
+async def validate_and_accept(self, message_id: str, mint_address: str) -> Dict[str, Any]:
+    """
+    Validate token and determine acceptance status.
+    
+    Args:
+        message_id: Discord message ID
+        mint_address: Token mint address
+        
+    Returns:
+        Validation and acceptance results
+    """
+    # Run parallel validation
+    validation_results = await self.validator.validate_token(mint_address)
+    
+    # Determine acceptance based on validation
+    verdict = validation_results['overall']['verdict']
+    
+    if verdict == "PASS":
+        status = "ACCEPT"
+        reason_code = None
+    elif verdict == "RISKY":
+        status = "ACCEPT"  # Accept but flag as risky
+        reason_code = "RISKY_VALIDATION"
+    else:
+        status = "REJECT"
+        reason_code = ";".join(validation_results['overall']['flags'])
+    
+    # Store acceptance status
+    async with self.db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO acceptance_status (
+                message_id, mint, first_seen, status, reason_code, 
+                evidence, pool_deadline, last_checked
+            ) VALUES ($1, $2, NOW(), $3, $4, $5, NOW() + INTERVAL '30 minutes', NOW())
+            ON CONFLICT (message_id) DO UPDATE SET
+                status = $3,
+                reason_code = $4,
+                evidence = $5,
+                last_checked = NOW()
+        """, 
+            message_id,
+            mint_address,
+            status,
+            reason_code,
+            json.dumps(validation_results)
+        )
+    
+    logger.info(f"{'✅' if status == 'ACCEPT' else '❌'} Token {mint_address[:8]}... {status}: {reason_code or 'VALID'}")
+    
+    return {
+        'status': status,
+        'reason_code': reason_code,
+        'validation': validation_results
+    }
         
         Args:
             message_id: Discord message snowflake ID

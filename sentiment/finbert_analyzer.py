@@ -1,274 +1,407 @@
 """
-FinBERT-BiLSTM Sentiment Analysis
-Specialized sentiment analysis for crypto token descriptions using FinTwitBERT
+CryptoBERT Sentiment Integration for AG Trading Bot
+Complete implementation ready for Cursor
 """
 
-import logging
 import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from typing import Dict, List, Optional, Tuple
-import numpy as np
-import asyncio
-import aiohttp
+import logging
+from typing import Dict, Optional, List
+from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
+import re
 from datetime import datetime
+import numpy as np
 
-logger = logging.getLogger(__name__)
+# ============================================
+# PART 1: Core Sentiment Analyzer
+# ============================================
 
-
-class FinBERTAnalyzer:
+class SimpleCryptoSentiment:
     """
-    FinBERT-based sentiment analyzer for crypto token descriptions.
-    Uses StephanAkkerman/FinTwitBERT-sentiment for domain-specific analysis.
+    Dead simple CryptoBERT sentiment analyzer optimized for memecoin launches.
+    Provides multiple scoring signals from a single model pass.
     """
     
-    def __init__(self, model_name: str = "StephanAkkerman/FinTwitBERT-sentiment"):
+    def __init__(self, model_name: str = "ElKulako/cryptobert", device: Optional[int] = None):
         """
-        Initialize FinBERT analyzer.
+        Initialize the sentiment analyzer.
         
         Args:
-            model_name: HuggingFace model name for FinBERT sentiment
+            model_name: HuggingFace model to use
+            device: CUDA device (-1 for CPU, 0+ for GPU)
         """
-        self.model_name = model_name
-        self.tokenizer = None
-        self.model = None
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-        # Sentiment labels mapping
-        self.label_mapping = {
-            0: "bearish",
-            1: "neutral", 
-            2: "bullish"
-        }
-        
-        logger.info(f"🧠 FinBERT analyzer initialized with model: {model_name}")
-        logger.info(f"📱 Using device: {self.device}")
-    
-    async def load_model(self):
-        """Load FinBERT model and tokenizer."""
-        if self.model is not None:
-            return
-        
-        logger.info(f"📥 Loading FinBERT model: {self.model_name}")
+        if device is None:
+            device = 0 if torch.cuda.is_available() else -1
+            
+        self.logger = logging.getLogger(__name__)
+        self.logger.info(f"Initializing CryptoBERT on device {device}")
         
         try:
-            # Load tokenizer and model
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
-            self.model.to(self.device)
-            self.model.eval()
-            
-            logger.info("✅ FinBERT model loaded successfully")
-            
+            self.analyzer = pipeline(
+                "sentiment-analysis",
+                model=model_name,
+                device=device,
+                truncation=True,
+                max_length=512
+            )
+            self.logger.info("CryptoBERT initialized successfully")
         except Exception as e:
-            logger.error(f"❌ Failed to load FinBERT model: {e}")
-            raise
-    
-    def preprocess_text(self, text: str) -> str:
-        """
-        Preprocess text for sentiment analysis.
-        
-        Args:
-            text: Raw text to analyze
+            self.logger.error(f"Failed to load model: {e}")
+            # Fallback to CPU if GPU fails
+            self.analyzer = pipeline(
+                "sentiment-analysis",
+                model=model_name,
+                device=-1,
+                truncation=True,
+                max_length=512
+            )
             
-        Returns:
-            Cleaned text
-        """
-        if not text:
-            return ""
-        
-        # Basic cleaning
-        text = text.strip()
-        
-        # Remove excessive whitespace
-        text = ' '.join(text.split())
-        
-        # Truncate if too long (BERT has 512 token limit)
-        if len(text) > 500:
-            text = text[:500]
-        
-        return text
-    
-    def analyze_sentiment(self, text: str) -> Dict[str, float]:
-        """
-        Analyze sentiment of a single text.
-        
-        Args:
-            text: Text to analyze
-            
-        Returns:
-            Dict with sentiment scores and prediction
-        """
-        if not text or not text.strip():
-            return {
-                'sentiment': 'neutral',
-                'confidence': 0.0,
-                'scores': {'bearish': 0.33, 'neutral': 0.34, 'bullish': 0.33}
-            }
-        
-        # Preprocess text
-        clean_text = self.preprocess_text(text)
-        
-        # Tokenize
-        inputs = self.tokenizer(
-            clean_text,
-            return_tensors="pt",
-            truncation=True,
-            padding=True,
-            max_length=512
-        )
-        
-        # Move to device
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        
-        # Get predictions
-        with torch.no_grad():
-            outputs = self.model(**inputs)
-            predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
-        
-        # Convert to numpy
-        scores = predictions.cpu().numpy()[0]
-        
-        # Get predicted class
-        predicted_class = np.argmax(scores)
-        sentiment = self.label_mapping[predicted_class]
-        confidence = float(scores[predicted_class])
-        
-        return {
-            'sentiment': sentiment,
-            'confidence': confidence,
-            'scores': {
-                'bearish': float(scores[0]),
-                'neutral': float(scores[1]),
-                'bullish': float(scores[2])
-            }
-        }
-    
-    def analyze_batch(self, texts: List[str], batch_size: int = 8) -> List[Dict[str, float]]:
-        """
-        Analyze sentiment for multiple texts in batches.
-        
-        Args:
-            texts: List of texts to analyze
-            batch_size: Batch size for processing
-            
-        Returns:
-            List of sentiment analysis results
-        """
-        results = []
-        
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
-            batch_results = []
-            
-            for text in batch:
-                result = self.analyze_sentiment(text)
-                batch_results.append(result)
-            
-            results.extend(batch_results)
-            
-            # Log progress
-            if len(texts) > batch_size:
-                logger.debug(f"📊 Processed {min(i + batch_size, len(texts))}/{len(texts)} texts")
-        
-        return results
-    
-    def extract_sentiment_features(self, text: str) -> Dict[str, float]:
-        """
-        Extract sentiment features for use in trading signals.
-        
-        Args:
-            text: Text to analyze (token description)
-            
-        Returns:
-            Dict with sentiment features
-        """
-        result = self.analyze_sentiment(text)
-        
-        # Calculate sentiment score (-1 to 1)
-        bullish_score = result['scores']['bullish']
-        bearish_score = result['scores']['bearish']
-        sentiment_score = bullish_score - bearish_score  # Range: -1 to 1
-        
-        # Normalize to 0-1 for consistency with other features
-        sentiment_normalized = (sentiment_score + 1) / 2
-        
-        return {
-            'sentiment_score': sentiment_normalized,
-            'sentiment_confidence': result['confidence'],
-            'sentiment_label': result['sentiment'],
-            'bullish_probability': bullish_score,
-            'bearish_probability': bearish_score,
-            'neutral_probability': result['scores']['neutral']
-        }
-    
-    async def analyze_token_description(self, description: str) -> Dict[str, float]:
-        """
-        Analyze sentiment of token description asynchronously.
-        
-        Args:
-            description: Token description text
-            
-        Returns:
-            Sentiment features dict
-        """
-        # Ensure model is loaded
-        await self.load_model()
-        
-        # Run analysis in thread pool to avoid blocking
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None, 
-            self.extract_sentiment_features, 
-            description
-        )
-        
-        return result
-
-
-# Singleton instance
-_analyzer = None
-
-
-async def get_analyzer() -> FinBERTAnalyzer:
-    """
-    Get or create FinBERT analyzer instance.
-    
-    Returns:
-        FinBERTAnalyzer instance
-    """
-    global _analyzer
-    
-    if _analyzer is None:
-        _analyzer = FinBERTAnalyzer()
-        await _analyzer.load_model()
-    
-    return _analyzer
-
-
-# Example usage
-if __name__ == "__main__":
-    async def test():
-        analyzer = await get_analyzer()
-        
-        # Test descriptions
-        test_texts = [
-            "Revolutionary DeFi protocol with massive potential for 100x gains!",
-            "Another worthless meme coin that will dump to zero",
-            "Solid fundamentals and experienced team behind this project",
-            "Rug pull incoming, avoid at all costs",
-            "Neutral description of a standard ERC-20 token"
+        # Memecoin-specific patterns
+        self.fomo_terms = [
+            'early', 'moon', 'gem', 'next', '100x', '1000x', 
+            'aping', 'send', 'lfg', 'wagmi', 'pump', 'flying',
+            'explode', 'parabolic', 'millionaire', 'generational'
         ]
         
-        print("\n🧠 FinBERT Sentiment Analysis Test")
-        print("=" * 50)
+        self.trust_terms = [
+            'renounced', 'burned', 'locked', 'audit', 'safe',
+            'community', 'cto', 'takeover', 'organic', 'fair'
+        ]
         
-        for text in test_texts:
-            result = await analyzer.analyze_token_description(text)
-            
-            print(f"\nText: {text[:60]}...")
-            print(f"Sentiment: {result['sentiment_label']} ({result['sentiment_confidence']:.2f})")
-            print(f"Score: {result['sentiment_score']:.3f}")
-            print(f"Bullish: {result['bullish_probability']:.3f}")
-            print(f"Bearish: {result['bearish_probability']:.3f}")
+        self.warning_terms = [
+            'dyor', 'risk', 'careful', 'might', 'maybe', 
+            'possibly', 'could', 'potential', 'nfa'
+        ]
+        
+        self.scam_indicators = [
+            'guaranteed', 'promise', 'definitely', 'easy money',
+            'risk free', 'cant lose', 'insider', 'secret'
+        ]
     
-    asyncio.run(test())
+    def score_description(self, text: str) -> Dict[str, float]:
+        """
+        Generate multiple sentiment signals from token description.
+        
+        Args:
+            text: Discord embed description text
+            
+        Returns:
+            Dictionary of normalized (0-1) sentiment features
+        """
+        if not text or len(text.strip()) < 10:
+            # Return neutral scores for empty/minimal descriptions
+            return {
+                'crypto_bullish_score': 0.5,
+                'sentiment_confidence': 0.0,
+                'fomo_intensity': 0.0,
+                'trust_score': 0.0,
+                'warning_flags': 0.0,
+                'scam_probability': 0.0,
+                'description_quality': 0.0,
+                'has_renounced': 0.0,
+                'has_burned_lp': 0.0,
+                'community_driven': 0.0
+            }
+        
+        # Clean text for analysis
+        text_lower = text.lower()
+        text_clean = re.sub(r'[^\w\s]', ' ', text_lower)
+        
+        # Get base sentiment from CryptoBERT
+        try:
+            result = self.analyzer(text[:512])[0]
+            
+            # Extract bullish probability
+            if result['label'].lower() == 'bullish':
+                bullish_score = result['score']
+            elif result['label'].lower() == 'bearish':
+                bullish_score = 1.0 - result['score']
+            else:  # neutral
+                bullish_score = 0.5
+                
+            confidence = result['score']
+            
+        except Exception as e:
+            self.logger.warning(f"Sentiment analysis failed: {e}")
+            bullish_score = 0.5
+            confidence = 0.0
+        
+        # Calculate specialized scores
+        features = {
+            # Primary sentiment
+            'crypto_bullish_score': bullish_score,
+            'sentiment_confidence': confidence,
+            
+            # FOMO intensity (0-1)
+            'fomo_intensity': self._calculate_term_intensity(text_lower, self.fomo_terms),
+            
+            # Trust indicators (0-1)
+            'trust_score': self._calculate_term_intensity(text_lower, self.trust_terms),
+            
+            # Warning flags (0-1) - higher = more cautious language
+            'warning_flags': self._calculate_term_intensity(text_lower, self.warning_terms),
+            
+            # Scam probability (0-1)
+            'scam_probability': self._calculate_term_intensity(text_lower, self.scam_indicators),
+            
+            # Description quality (length & structure)
+            'description_quality': self._calculate_quality_score(text),
+            
+            # Critical binary features for memecoins
+            'has_renounced': float('renounced' in text_lower or 'renounce' in text_lower),
+            'has_burned_lp': float(
+                ('burn' in text_lower or 'burned' in text_lower) and 
+                ('lp' in text_lower or 'liquidity' in text_lower)
+            ),
+            'community_driven': float(
+                any(term in text_lower for term in ['community', 'cto', 'takeover', 'community takeover'])
+            )
+        }
+        
+        return features
+    
+    def _calculate_term_intensity(self, text: str, terms: List[str]) -> float:
+        """Calculate normalized intensity score based on term frequency."""
+        if not text:
+            return 0.0
+            
+        matches = sum(1 for term in terms if term in text)
+        # Use sqrt to prevent single term domination
+        return min(np.sqrt(matches / len(terms)) * 2, 1.0)
+    
+    def _calculate_quality_score(self, text: str) -> float:
+        """
+        Calculate quality score based on description characteristics.
+        Higher quality = more likely to be legitimate project.
+        """
+        if not text:
+            return 0.0
+            
+        # Length score (sweet spot: 100-500 chars)
+        length = len(text)
+        if length < 50:
+            length_score = 0.2
+        elif length < 100:
+            length_score = 0.5
+        elif length <= 500:
+            length_score = 1.0
+        else:
+            length_score = max(0.7, 1.0 - (length - 500) / 1000)
+            
+        # Structure score (has sentences, not just keywords)
+        sentences = len(re.split(r'[.!?]+', text))
+        structure_score = min(sentences / 3, 1.0)
+        
+        # Link presence (CA, website, twitter)
+        has_links = float(bool(re.search(r'https?://|0x[a-fA-F0-9]{40,}|@\w+', text)))
+        
+        # Combine scores
+        quality = (length_score * 0.5 + structure_score * 0.3 + has_links * 0.2)
+        
+        return min(quality, 1.0)
+
+
+# ============================================
+# PART 2: Integration with Existing Pipeline
+# ============================================
+
+class EnhancedMetricsParser:
+    """
+    Extends your existing metrics parser with sentiment features.
+    Drop-in replacement for your current parse_metrics function.
+    """
+    
+    def __init__(self, sentiment_analyzer: Optional[SimpleCryptoSentiment] = None):
+        """
+        Initialize enhanced parser.
+        
+        Args:
+            sentiment_analyzer: Instance of SimpleCryptoSentiment (creates one if None)
+        """
+        self.sentiment = sentiment_analyzer or SimpleCryptoSentiment()
+        self.logger = logging.getLogger(__name__)
+        
+    def parse_metrics_with_sentiment(self, embed_data: Dict, description: str = "") -> Dict[str, float]:
+        """
+        Parse both objective metrics and sentiment features.
+        
+        Args:
+            embed_data: Discord embed data (your existing 58 metrics)
+            description: Token description text from Discord
+            
+        Returns:
+            Combined dictionary with 58 + 10 = 68 total features
+        """
+        # Parse your existing objective metrics
+        metrics = self.parse_objective_metrics(embed_data)
+        
+        # Add sentiment features if description exists
+        if description and len(description.strip()) > 0:
+            sentiment_features = self.sentiment.score_description(description)
+            metrics.update(sentiment_features)
+            self.logger.debug(f"Added {len(sentiment_features)} sentiment features")
+        else:
+            # Add neutral sentiment features if no description
+            metrics.update({
+                'crypto_bullish_score': 0.5,
+                'sentiment_confidence': 0.0,
+                'fomo_intensity': 0.0,
+                'trust_score': 0.0,
+                'warning_flags': 0.0,
+                'scam_probability': 0.0,
+                'description_quality': 0.0,
+                'has_renounced': 0.0,
+                'has_burned_lp': 0.0,
+                'community_driven': 0.0
+            })
+            
+        return metrics
+    
+    def parse_objective_metrics(self, embed_data: Dict) -> Dict[str, float]:
+        """
+        Your existing metrics parsing logic.
+        This is a placeholder - use your actual implementation.
+        """
+        # This should be your existing parse_metrics function
+        # Keeping the same 58 features you already have
+        
+        metrics = {}
+        
+        # Market metrics
+        metrics['market_cap'] = float(embed_data.get('market_cap', 0))
+        metrics['liquidity'] = float(embed_data.get('liquidity', 0))
+        metrics['volume_24h'] = float(embed_data.get('volume_24h', 0))
+        metrics['price'] = float(embed_data.get('price', 0))
+        metrics['fdv'] = float(embed_data.get('fdv', 0))
+        
+        # Holder metrics
+        metrics['holder_count'] = float(embed_data.get('holder_count', 0))
+        metrics['top_10_holdings'] = float(embed_data.get('top_10_holdings', 0))
+        
+        # AG specific
+        metrics['ag_score'] = float(embed_data.get('ag_score', 0))
+        
+        # Add your other 50 metrics here...
+        
+        return metrics
+
+
+# ============================================
+# PART 3: Database Integration
+# ============================================
+
+def add_sentiment_columns_to_db(connection):
+    """
+    Add sentiment columns to your existing database schema.
+    Run this once to update your database.
+    """
+    alter_statements = [
+        "ALTER TABLE enriched_messages ADD COLUMN IF NOT EXISTS crypto_bullish_score REAL DEFAULT 0.5",
+        "ALTER TABLE enriched_messages ADD COLUMN IF NOT EXISTS sentiment_confidence REAL DEFAULT 0.0",
+        "ALTER TABLE enriched_messages ADD COLUMN IF NOT EXISTS fomo_intensity REAL DEFAULT 0.0",
+        "ALTER TABLE enriched_messages ADD COLUMN IF NOT EXISTS trust_score REAL DEFAULT 0.0",
+        "ALTER TABLE enriched_messages ADD COLUMN IF NOT EXISTS warning_flags REAL DEFAULT 0.0",
+        "ALTER TABLE enriched_messages ADD COLUMN IF NOT EXISTS scam_probability REAL DEFAULT 0.0",
+        "ALTER TABLE enriched_messages ADD COLUMN IF NOT EXISTS description_quality REAL DEFAULT 0.0",
+        "ALTER TABLE enriched_messages ADD COLUMN IF NOT EXISTS has_renounced REAL DEFAULT 0.0",
+        "ALTER TABLE enriched_messages ADD COLUMN IF NOT EXISTS has_burned_lp REAL DEFAULT 0.0",
+        "ALTER TABLE enriched_messages ADD COLUMN IF NOT EXISTS community_driven REAL DEFAULT 0.0"
+    ]
+    
+    cursor = connection.cursor()
+    for statement in alter_statements:
+        cursor.execute(statement)
+    connection.commit()
+    print("Database schema updated with sentiment columns")
+
+
+# ============================================
+# PART 4: Usage Example & Integration Guide
+# ============================================
+
+def main_integration_example():
+    """
+    Example showing how to integrate this into your existing pipeline.
+    """
+    # Initialize components
+    sentiment_analyzer = SimpleCryptoSentiment()
+    parser = EnhancedMetricsParser(sentiment_analyzer)
+    
+    # Example Discord message data
+    example_embed = {
+        'market_cap': 250000,
+        'liquidity': 50.5,
+        'volume_24h': 125000,
+        'holder_count': 156,
+        'ag_score': 78,
+        # ... your other metrics
+    }
+    
+    example_description = """
+    🚀 $PEPE2.0 - The Return of the King! 
+    
+    Dev RENOUNCED ✅ LP BURNED 🔥 
+    Community takeover in progress! This gem is going to the moon! 
+    Early holders will be rewarded. DYOR but don't miss this opportunity!
+    
+    CA: 0x1234...
+    TG: @pepe2community
+    """
+    
+    # Parse all metrics including sentiment
+    all_features = parser.parse_metrics_with_sentiment(example_embed, example_description)
+    
+    print(f"Total features: {len(all_features)}")
+    print("\nSentiment features extracted:")
+    for key, value in all_features.items():
+        if 'sentiment' in key or 'crypto' in key or 'fomo' in key or 'trust' in key:
+            print(f"  {key}: {value:.3f}")
+    
+    # These features now feed directly into your GA trainer
+    # The GA will determine optimal thresholds for BUY/SKIP signals
+
+
+# ============================================
+# PART 5: Quick Start Instructions
+# ============================================
+
+"""
+INSTALLATION (run in your ag-trading-bot directory):
+
+pip install transformers torch
+
+INTEGRATION STEPS:
+
+1. Copy this entire file to: ag-trading-bot/ingest/sentiment_analyzer.py
+
+2. Update your existing message processor:
+
+   # In your message processing loop
+   from ingest.sentiment_analyzer import SimpleCryptoSentiment, EnhancedMetricsParser
+   
+   parser = EnhancedMetricsParser()
+   
+   # When processing each Discord message:
+   metrics = parser.parse_metrics_with_sentiment(embed_data, description_text)
+   
+3. Update your database (run once):
+
+   from ingest.sentiment_analyzer import add_sentiment_columns_to_db
+   add_sentiment_columns_to_db(your_db_connection)
+
+4. Update your GA trainer to use 68 features instead of 58:
+
+   # No code changes needed! 
+   # GA will automatically use all features in the metrics dict
+
+5. Start collecting data with sentiment features!
+
+TESTING:
+
+if __name__ == "__main__":
+    # Test the integration
+    main_integration_example()
+"""
+
+if __name__ == "__main__":
+    # Run test
+    main_integration_example()

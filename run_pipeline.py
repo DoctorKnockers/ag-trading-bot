@@ -17,7 +17,7 @@ from ingest.mint_resolver import MintResolver
 from outcomes.outcome_tracker import OutcomeTracker
 from features.snapshot import FeatureSnapshot
 from train.cluster_router import ClusterRouter
-from train.ga_trainer import GATrainer
+from train.deap_ga_trainer import get_trainer
 from signal.signal_service import SignalService
 
 # Load environment
@@ -90,12 +90,39 @@ class AGTradingBotPipeline:
         logger.info("📸 Processing feature extraction...")
         await self.feature_extractor.process_pending_features()
     
-    async def train_clusters(self):
-        """Train clustering model."""
-        logger.info("🧠 Training clusters...")
-        result = await self.cluster_router.train_clusters()
-        logger.info(f"✅ Trained {result['n_clusters']} clusters")
-        return result
+   # DELETE THE OLD METHOD and REPLACE WITH:
+async def train_strategies(self):
+    """Train strategies for all clusters using DEAP GA."""
+    logger.info("🎯 Training strategies with DEAP GA...")
+    
+    # Get cluster count
+    async with self.db_pool.acquire() as conn:
+        cluster_count = await conn.fetchval("SELECT COUNT(*) FROM strategy_clusters")
+    
+    if cluster_count == 0:
+        logger.warning("No clusters found - train clusters first")
+        return
+    
+    # Train strategy for each cluster
+    results = []
+    for cluster_id in range(cluster_count):
+        logger.info(f"Training strategy for cluster {cluster_id}")
+        
+        # Get DEAP trainer
+        trainer = await get_trainer(self.db_pool, cluster_id)
+        
+        # Run evolution
+        result = await trainer.evolve()
+        
+        if result:
+            logger.info(f"✅ Cluster {cluster_id} trained successfully")
+            logger.info(f"  Win rate: {result['fitness']['win_rate']:.2%}")
+            logger.info(f"  Sharpe: {result['fitness']['sharpe_ratio']:.3f}")
+            results.append(result)
+        else:
+            logger.warning(f"⚠️ Cluster {cluster_id} training failed - insufficient data")
+    
+    return results
     
     async def train_strategies(self):
         """Train strategies for all clusters."""
