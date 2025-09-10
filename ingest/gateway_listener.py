@@ -13,6 +13,7 @@ from typing import Dict, Any, Optional, List
 import asyncpg
 import discord
 from discord.ext import commands
+from sentiment import EnhancedMetricsParser
 
 from config import settings
 
@@ -38,6 +39,9 @@ class DiscordMessageScraper:
             db_pool: PostgreSQL connection pool
         """
         self.db_pool = db_pool
+        
+        # Initialize sentiment-enhanced metrics parser
+        self.metrics_parser = EnhancedMetricsParser()
         
         # Create Discord client in user mode (not bot)
         # This requires a user token for passive scraping
@@ -94,8 +98,12 @@ class DiscordMessageScraper:
         # Convert to raw payload format
         raw_payload = self._message_to_payload(message)
         
-        # Store in database
+        # Store raw message in database
         await self.store_message(raw_payload)
+        
+        # Process message with sentiment analysis if it has embeds
+        if raw_payload.get('embeds'):
+            await self.process_message_with_sentiment(raw_payload)
         
         # Log for monitoring
         logger.info(f"📨 Scraped message {message.id} from {message.author.name}")
@@ -281,6 +289,99 @@ class DiscordMessageScraper:
                 
         except Exception as e:
             logger.error(f"Failed to store message {payload.get('id')}: {e}")
+    
+    async def process_message_with_sentiment(self, payload: Dict[str, Any]):
+        """
+        Process message with sentiment analysis and store enhanced features.
+        
+        Args:
+            payload: Raw Discord message payload
+        """
+        try:
+            message_id = payload['id']
+            
+            # Extract description from embeds for sentiment analysis
+            description = self._extract_description(payload)
+            
+            # Convert payload to format expected by metrics parser
+            embed_data = self._payload_to_embed_data(payload)
+            
+            # Parse metrics WITH sentiment features (58 + 10 = 68 features)
+            all_features = self.metrics_parser.parse_metrics_with_sentiment(
+                embed_data, 
+                description
+            )
+            
+            # Store enhanced features in features_snapshot table
+            await self.store_enhanced_features(message_id, all_features)
+            
+            logger.info(f"🧠 Processed {len(all_features)} features (with sentiment) for {message_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to process message with sentiment {payload.get('id')}: {e}")
+    
+    def _extract_description(self, payload: Dict[str, Any]) -> str:
+        """Extract description text from Discord message payload for sentiment analysis."""
+        description = ""
+        
+        # Try embed description first
+        for embed in payload.get('embeds', []):
+            if embed.get('description'):
+                description = embed['description']
+                break
+        
+        # Try message content if no embed description
+        if not description and payload.get('content'):
+            description = payload['content']
+        
+        # Try embed fields that might contain description
+        if not description:
+            for embed in payload.get('embeds', []):
+                for field in embed.get('fields', []):
+                    field_name = field.get('name', '').lower()
+                    if any(keyword in field_name for keyword in ['description', 'about', 'info', 'details']):
+                        description = field.get('value', '')
+                        break
+                if description:
+                    break
+        
+        return description.strip()
+    
+    def _payload_to_embed_data(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert Discord payload to format expected by LaunchpadMetricsParser."""
+        # The LaunchpadMetricsParser expects the raw embed data
+        # Return the first embed or empty dict
+        embeds = payload.get('embeds', [])
+        return embeds[0] if embeds else {}
+    
+    async def store_enhanced_features(self, message_id: str, features: Dict[str, float]):
+        """
+        Store enhanced features (including sentiment) in features_snapshot table.
+        
+        Args:
+            message_id: Discord message ID
+            features: Dictionary of all features (objective + sentiment)
+        """
+        try:
+            async with self.db_pool.acquire() as conn:
+                await conn.execute("""
+                    INSERT INTO features_snapshot 
+                    (message_id, snapped_at, features, feature_version)
+                    VALUES ($1, NOW(), $2, $3)
+                    ON CONFLICT (message_id) DO UPDATE
+                    SET features = EXCLUDED.features,
+                        snapped_at = EXCLUDED.snapped_at,
+                        feature_version = EXCLUDED.feature_version
+                """, 
+                    message_id, 
+                    json.dumps(features),  # Store as JSONB
+                    2  # Version 2 includes sentiment features
+                )
+                
+                logger.debug(f"Stored {len(features)} features for message {message_id}")
+                
+        except Exception as e:
+            logger.error(f"Failed to store enhanced features for {message_id}: {e}")
     
     async def fetch_recent_messages(self, channel: discord.TextChannel, limit: int = 100):
         """

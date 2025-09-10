@@ -6,10 +6,17 @@ Complete implementation ready for Cursor
 import torch
 import logging
 from typing import Dict, Optional, List
-from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
 import re
 from datetime import datetime
 import numpy as np
+
+# Handle macOS signal issues with transformers
+try:
+    from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
+    TRANSFORMERS_AVAILABLE = True
+except Exception as e:
+    logging.warning(f"Transformers import failed (likely macOS signal issue): {e}")
+    TRANSFORMERS_AVAILABLE = False
 
 # ============================================
 # PART 1: Core Sentiment Analyzer
@@ -35,25 +42,34 @@ class SimpleCryptoSentiment:
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"Initializing CryptoBERT on device {device}")
         
-        try:
-            self.analyzer = pipeline(
-                "sentiment-analysis",
-                model=model_name,
-                device=device,
-                truncation=True,
-                max_length=512
-            )
-            self.logger.info("CryptoBERT initialized successfully")
-        except Exception as e:
-            self.logger.error(f"Failed to load model: {e}")
-            # Fallback to CPU if GPU fails
-            self.analyzer = pipeline(
-                "sentiment-analysis",
-                model=model_name,
-                device=-1,
-                truncation=True,
-                max_length=512
-            )
+        if not TRANSFORMERS_AVAILABLE:
+            self.logger.warning("Transformers not available - using rule-based sentiment fallback")
+            self.analyzer = None
+        else:
+            try:
+                self.analyzer = pipeline(
+                    "sentiment-analysis",
+                    model=model_name,
+                    device=device,
+                    truncation=True,
+                    max_length=512
+                )
+                self.logger.info("CryptoBERT initialized successfully")
+            except Exception as e:
+                self.logger.error(f"Failed to load model: {e}")
+                try:
+                    # Fallback to CPU if GPU fails
+                    self.analyzer = pipeline(
+                        "sentiment-analysis",
+                        model=model_name,
+                        device=-1,
+                        truncation=True,
+                        max_length=512
+                    )
+                    self.logger.info("CryptoBERT initialized on CPU fallback")
+                except Exception as e2:
+                    self.logger.error(f"All model loading failed: {e2}")
+                    self.analyzer = None
             
         # Memecoin-specific patterns
         self.fomo_terms = [
@@ -106,24 +122,27 @@ class SimpleCryptoSentiment:
         text_lower = text.lower()
         text_clean = re.sub(r'[^\w\s]', ' ', text_lower)
         
-        # Get base sentiment from CryptoBERT
-        try:
-            result = self.analyzer(text[:512])[0]
-            
-            # Extract bullish probability
-            if result['label'].lower() == 'bullish':
-                bullish_score = result['score']
-            elif result['label'].lower() == 'bearish':
-                bullish_score = 1.0 - result['score']
-            else:  # neutral
-                bullish_score = 0.5
+        # Get base sentiment from CryptoBERT or fallback to rule-based
+        if self.analyzer is not None:
+            try:
+                result = self.analyzer(text[:512])[0]
                 
-            confidence = result['score']
-            
-        except Exception as e:
-            self.logger.warning(f"Sentiment analysis failed: {e}")
-            bullish_score = 0.5
-            confidence = 0.0
+                # Extract bullish probability
+                if result['label'].lower() == 'bullish':
+                    bullish_score = result['score']
+                elif result['label'].lower() == 'bearish':
+                    bullish_score = 1.0 - result['score']
+                else:  # neutral
+                    bullish_score = 0.5
+                    
+                confidence = result['score']
+                
+            except Exception as e:
+                self.logger.warning(f"Sentiment analysis failed: {e}")
+                bullish_score, confidence = self._rule_based_sentiment(text_lower)
+        else:
+            # Use rule-based fallback
+            bullish_score, confidence = self._rule_based_sentiment(text_lower)
         
         # Calculate specialized scores
         features = {
@@ -158,6 +177,33 @@ class SimpleCryptoSentiment:
         }
         
         return features
+    
+    def _rule_based_sentiment(self, text_lower: str) -> tuple[float, float]:
+        """
+        Rule-based sentiment fallback when CryptoBERT is not available.
+        
+        Args:
+            text_lower: Lowercase text to analyze
+            
+        Returns:
+            Tuple of (bullish_score, confidence)
+        """
+        # Count positive and negative indicators
+        positive_count = sum(1 for term in self.fomo_terms + self.trust_terms if term in text_lower)
+        negative_count = sum(1 for term in self.warning_terms + self.scam_indicators if term in text_lower)
+        
+        # Calculate simple sentiment score
+        if positive_count > negative_count:
+            bullish_score = 0.6 + min(0.3, (positive_count - negative_count) * 0.1)
+            confidence = min(0.8, 0.4 + (positive_count - negative_count) * 0.1)
+        elif negative_count > positive_count:
+            bullish_score = 0.4 - min(0.3, (negative_count - positive_count) * 0.1)
+            confidence = min(0.8, 0.4 + (negative_count - positive_count) * 0.1)
+        else:
+            bullish_score = 0.5
+            confidence = 0.3
+            
+        return bullish_score, confidence
     
     def _calculate_term_intensity(self, text: str, terms: List[str]) -> float:
         """Calculate normalized intensity score based on term frequency."""
@@ -258,31 +304,16 @@ class EnhancedMetricsParser:
     
     def parse_objective_metrics(self, embed_data: Dict) -> Dict[str, float]:
         """
-        Your existing metrics parsing logic.
-        This is a placeholder - use your actual implementation.
+        Use your actual LaunchpadMetricsParser for objective metrics.
         """
-        # This should be your existing parse_metrics function
-        # Keeping the same 58 features you already have
+        # Import your actual parser
+        from ingest.metrics_parser import LaunchpadMetricsParser
         
-        metrics = {}
+        if not hasattr(self, '_objective_parser'):
+            self._objective_parser = LaunchpadMetricsParser()
         
-        # Market metrics
-        metrics['market_cap'] = float(embed_data.get('market_cap', 0))
-        metrics['liquidity'] = float(embed_data.get('liquidity', 0))
-        metrics['volume_24h'] = float(embed_data.get('volume_24h', 0))
-        metrics['price'] = float(embed_data.get('price', 0))
-        metrics['fdv'] = float(embed_data.get('fdv', 0))
-        
-        # Holder metrics
-        metrics['holder_count'] = float(embed_data.get('holder_count', 0))
-        metrics['top_10_holdings'] = float(embed_data.get('top_10_holdings', 0))
-        
-        # AG specific
-        metrics['ag_score'] = float(embed_data.get('ag_score', 0))
-        
-        # Add your other 50 metrics here...
-        
-        return metrics
+        # Use your existing comprehensive metrics parser
+        return self._objective_parser.parse_message_metrics(embed_data)
 
 
 # ============================================
@@ -293,25 +324,14 @@ def add_sentiment_columns_to_db(connection):
     """
     Add sentiment columns to your existing database schema.
     Run this once to update your database.
-    """
-    alter_statements = [
-        "ALTER TABLE enriched_messages ADD COLUMN IF NOT EXISTS crypto_bullish_score REAL DEFAULT 0.5",
-        "ALTER TABLE enriched_messages ADD COLUMN IF NOT EXISTS sentiment_confidence REAL DEFAULT 0.0",
-        "ALTER TABLE enriched_messages ADD COLUMN IF NOT EXISTS fomo_intensity REAL DEFAULT 0.0",
-        "ALTER TABLE enriched_messages ADD COLUMN IF NOT EXISTS trust_score REAL DEFAULT 0.0",
-        "ALTER TABLE enriched_messages ADD COLUMN IF NOT EXISTS warning_flags REAL DEFAULT 0.0",
-        "ALTER TABLE enriched_messages ADD COLUMN IF NOT EXISTS scam_probability REAL DEFAULT 0.0",
-        "ALTER TABLE enriched_messages ADD COLUMN IF NOT EXISTS description_quality REAL DEFAULT 0.0",
-        "ALTER TABLE enriched_messages ADD COLUMN IF NOT EXISTS has_renounced REAL DEFAULT 0.0",
-        "ALTER TABLE enriched_messages ADD COLUMN IF NOT EXISTS has_burned_lp REAL DEFAULT 0.0",
-        "ALTER TABLE enriched_messages ADD COLUMN IF NOT EXISTS community_driven REAL DEFAULT 0.0"
-    ]
     
-    cursor = connection.cursor()
-    for statement in alter_statements:
-        cursor.execute(statement)
-    connection.commit()
-    print("Database schema updated with sentiment columns")
+    Note: Your schema uses JSONB in features_snapshot table, so no schema changes needed!
+    The sentiment features will be automatically included in the features JSONB column.
+    This function is provided for compatibility but is not required for your setup.
+    """
+    print("✅ No database schema changes needed!")
+    print("Your features_snapshot table uses JSONB which automatically handles sentiment features.")
+    print("The EnhancedMetricsParser will include sentiment data in the features JSON.")
 
 
 # ============================================
