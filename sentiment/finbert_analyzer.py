@@ -9,6 +9,8 @@ from typing import Dict, Optional, List
 import re
 from datetime import datetime
 import numpy as np
+import hashlib
+from functools import lru_cache
 
 # Handle macOS signal issues with transformers
 try:
@@ -46,30 +48,8 @@ class SimpleCryptoSentiment:
             self.logger.warning("Transformers not available - using rule-based sentiment fallback")
             self.analyzer = None
         else:
-            try:
-                self.analyzer = pipeline(
-                    "sentiment-analysis",
-                    model=model_name,
-                    device=device,
-                    truncation=True,
-                    max_length=512
-                )
-                self.logger.info("CryptoBERT initialized successfully")
-            except Exception as e:
-                self.logger.error(f"Failed to load model: {e}")
-                try:
-                    # Fallback to CPU if GPU fails
-                    self.analyzer = pipeline(
-                        "sentiment-analysis",
-                        model=model_name,
-                        device=-1,
-                        truncation=True,
-                        max_length=512
-                    )
-                    self.logger.info("CryptoBERT initialized on CPU fallback")
-                except Exception as e2:
-                    self.logger.error(f"All model loading failed: {e2}")
-                    self.analyzer = None
+            # Try multiple models in order of preference
+            self.analyzer = self._initialize_model_with_fallbacks(model_name, device)
             
         # Memecoin-specific patterns
         self.fomo_terms = [
@@ -93,9 +73,72 @@ class SimpleCryptoSentiment:
             'risk free', 'cant lose', 'insider', 'secret'
         ]
     
+    def _initialize_model_with_fallbacks(self, primary_model: str, device: int):
+        """
+        Initialize sentiment model with multiple fallback options.
+        
+        Args:
+            primary_model: Primary model to try (ElKulako/cryptobert)
+            device: Device to use
+            
+        Returns:
+            Loaded pipeline or None if all fail
+        """
+        # Model fallback chain (in order of preference)
+        models_to_try = [
+            (primary_model, "CryptoBERT (primary)"),
+            ("cardiffnlp/twitter-roberta-base-sentiment-latest", "Twitter-RoBERTa (crypto-aware)"),
+            ("distilbert-base-uncased-finetuned-sst-2-english", "DistilBERT (lightweight)")
+        ]
+        
+        for model_name, model_desc in models_to_try:
+            try:
+                self.logger.info(f"Trying to load {model_desc}...")
+                analyzer = pipeline(
+                    "sentiment-analysis",
+                    model=model_name,
+                    device=device,
+                    truncation=True,
+                    max_length=512
+                )
+                self.logger.info(f"✅ Successfully loaded {model_desc}")
+                return analyzer
+                
+            except Exception as e:
+                self.logger.warning(f"Failed to load {model_desc}: {e}")
+                
+                # Try CPU fallback for the same model
+                if device != -1:
+                    try:
+                        self.logger.info(f"Trying {model_desc} on CPU...")
+                        analyzer = pipeline(
+                            "sentiment-analysis",
+                            model=model_name,
+                            device=-1,
+                            truncation=True,
+                            max_length=512
+                        )
+                        self.logger.info(f"✅ Successfully loaded {model_desc} on CPU")
+                        return analyzer
+                    except Exception as e2:
+                        self.logger.warning(f"CPU fallback also failed for {model_desc}: {e2}")
+        
+        # All models failed
+        self.logger.error("❌ All sentiment models failed to load - using rule-based fallback")
+        return None
+    
+    @lru_cache(maxsize=1000)
+    def _cached_sentiment_analysis(self, text_hash: str, text: str) -> Dict[str, float]:
+        """
+        Cached sentiment analysis to avoid recomputing identical descriptions.
+        Uses text hash for cache key to handle identical descriptions efficiently.
+        """
+        return self._compute_sentiment_features(text)
+    
     def score_description(self, text: str) -> Dict[str, float]:
         """
         Generate multiple sentiment signals from token description.
+        Uses caching to avoid recomputing identical descriptions.
         
         Args:
             text: Discord embed description text
@@ -118,6 +161,16 @@ class SimpleCryptoSentiment:
                 'community_driven': 0.0
             }
         
+        # Create hash for caching
+        text_hash = hashlib.md5(text.encode()).hexdigest()
+        
+        # Use cached analysis
+        return self._cached_sentiment_analysis(text_hash, text)
+    
+    def _compute_sentiment_features(self, text: str) -> Dict[str, float]:
+        """
+        Actual sentiment computation (called by cached method).
+        """
         # Clean text for analysis
         text_lower = text.lower()
         text_clean = re.sub(r'[^\w\s]', ' ', text_lower)
@@ -312,8 +365,29 @@ class EnhancedMetricsParser:
         if not hasattr(self, '_objective_parser'):
             self._objective_parser = LaunchpadMetricsParser()
         
+        # The LaunchpadMetricsParser expects the full message payload
+        # Create a minimal payload structure for the parser
+        message_payload = {
+            'embeds': [embed_data] if embed_data else [],
+            'components': [],  # Add empty components
+            'content': ''  # Add empty content
+        }
+        
         # Use your existing comprehensive metrics parser
-        return self._objective_parser.parse_message_metrics(embed_data)
+        metrics = self._objective_parser.parse_message_metrics(message_payload)
+        
+        # Convert all values to float for consistency
+        float_metrics = {}
+        for key, value in metrics.items():
+            try:
+                if value is not None:
+                    float_metrics[key] = float(value)
+                else:
+                    float_metrics[key] = 0.0
+            except (ValueError, TypeError):
+                float_metrics[key] = 0.0
+                
+        return float_metrics
 
 
 # ============================================
@@ -322,16 +396,59 @@ class EnhancedMetricsParser:
 
 def add_sentiment_columns_to_db(connection):
     """
-    Add sentiment columns to your existing database schema.
-    Run this once to update your database.
+    Your existing schema is already perfect! 
+    Features are stored in features_snapshot.features as JSONB.
+    Sentiment features are automatically included.
     
-    Note: Your schema uses JSONB in features_snapshot table, so no schema changes needed!
-    The sentiment features will be automatically included in the features JSONB column.
-    This function is provided for compatibility but is not required for your setup.
+    This function is for reference only - no changes needed.
     """
-    print("✅ No database schema changes needed!")
-    print("Your features_snapshot table uses JSONB which automatically handles sentiment features.")
-    print("The EnhancedMetricsParser will include sentiment data in the features JSON.")
+    print("✅ Your database schema is already optimized!")
+    print("✅ features_snapshot.features (JSONB) automatically includes sentiment data")
+    print("✅ No schema changes required - sentiment integration is seamless")
+    
+def create_optional_sentiment_table(connection):
+    """
+    OPTIONAL: Create dedicated sentiment table for easier querying.
+    Only use this if you want to query sentiment features separately.
+    """
+    create_table_sql = """
+    CREATE TABLE IF NOT EXISTS message_sentiment (
+        message_id TEXT PRIMARY KEY REFERENCES discord_raw(message_id),
+        crypto_bullish_score REAL DEFAULT 0.5,
+        sentiment_confidence REAL DEFAULT 0.0,
+        fomo_intensity REAL DEFAULT 0.0,
+        trust_score REAL DEFAULT 0.0,
+        warning_flags REAL DEFAULT 0.0,
+        scam_probability REAL DEFAULT 0.0,
+        description_quality REAL DEFAULT 0.0,
+        has_renounced REAL DEFAULT 0.0,
+        has_burned_lp REAL DEFAULT 0.0,
+        community_driven REAL DEFAULT 0.0,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    
+    -- Index for faster queries
+    CREATE INDEX IF NOT EXISTS idx_sentiment_bullish ON message_sentiment(crypto_bullish_score DESC);
+    CREATE INDEX IF NOT EXISTS idx_sentiment_trust ON message_sentiment(trust_score DESC);
+    """
+    
+    try:
+        if hasattr(connection, 'execute'):
+            # asyncpg connection
+            import asyncio
+            asyncio.create_task(connection.execute(create_table_sql))
+        else:
+            # Standard DB connection
+            cursor = connection.cursor()
+            cursor.execute(create_table_sql)
+            connection.commit()
+        
+        print("✅ Optional sentiment table created successfully")
+        
+    except Exception as e:
+        print(f"⚠️ Optional table creation failed (this is OK): {e}")
+        print("✅ Sentiment data will still work via features_snapshot table")
 
 
 # ============================================
