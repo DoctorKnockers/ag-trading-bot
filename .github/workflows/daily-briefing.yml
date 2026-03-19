@@ -1,0 +1,55 @@
+name: Daily RE Strategic Briefing
+
+on:
+  schedule:
+    - cron: '0 16 * * *'  # 16:00 UTC / ~12:00 ET daily
+  workflow_dispatch:       # Manual trigger for testing
+
+permissions:
+  contents: write
+
+jobs:
+  generate-briefing:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set date variable
+        run: echo "BRIEFING_DATE=$(date -u +%Y-%m-%d)" >> $GITHUB_ENV
+
+      - name: Check if briefing already exists
+        id: check
+        run: |
+          if [ -f "briefings/${{ env.BRIEFING_DATE }}-daily-briefing.md" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate briefing with Claude
+        if: steps.check.outputs.exists == 'false'
+        uses: anthropic/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Read the file briefings/briefing-prompt.md for your full instructions.
+            Today's date is ${{ env.BRIEFING_DATE }}.
+            Generate the daily strategic briefing by:
+            1. Performing all mandatory web searches listed in the prompt
+            2. Writing the complete briefing following the exact output structure
+            3. Save the output to briefings/${{ env.BRIEFING_DATE }}-daily-briefing.md
+            Do NOT modify any other files. Only create the briefing file.
+          allowed_tools: "WebSearch,Write,Read"
+          max_turns: 25
+
+      - name: Commit and push briefing
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "briefings/${{ env.BRIEFING_DATE }}-daily-briefing.md"
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git commit -m "Add daily RE briefing for ${{ env.BRIEFING_DATE }}"
+          git pull --rebase origin main
+          git push
